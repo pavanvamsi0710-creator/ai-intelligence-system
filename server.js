@@ -9,9 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 5051;
-
-/* ================= START SERVER FUNCTION ================= */
+/* ================= START SERVER ================= */
 
 async function startServer() {
   try {
@@ -20,9 +18,16 @@ async function startServer() {
     }
 
     const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
+      connectionString: process.env.DATABASE_URL,
+      ssl: {
+        rejectUnauthorized: false   // 🔥 REQUIRED FOR RAILWAY
+      }
+    });
 
+    // Test connection
+    await pool.query("SELECT 1");
+
+    // Create table if not exists
     await pool.query(`
       CREATE TABLE IF NOT EXISTS news (
         id SERIAL PRIMARY KEY,
@@ -72,67 +77,82 @@ async function startServer() {
     /* ================= ROUTES ================= */
 
     app.post("/api/news/raw", async (req, res) => {
-      const { title, summary, category } = req.body;
+      try {
+        const { title, summary, category } = req.body;
 
-      if (!title || !summary) {
-        return res.json({ skipped: true });
-      }
+        if (!title || !summary) {
+          return res.json({ skipped: true });
+        }
 
-      const cleanTitle = clean(title);
-      const topicHash = makeTopicHash(cleanTitle);
+        const cleanTitle = clean(title);
+        const topicHash = makeTopicHash(cleanTitle);
 
-      const existing = await pool.query(
-        "SELECT * FROM news WHERE topic_hash = $1",
-        [topicHash]
-      );
-
-      if (existing.rows.length > 0) {
-        const row = existing.rows[0];
-        const newCount = row.repetition_count + 1;
-        const newScore = calculateScore(
-          newCount,
-          row.category,
-          row.createdAt
+        const existing = await pool.query(
+          "SELECT * FROM news WHERE topic_hash = $1",
+          [topicHash]
         );
+
+        if (existing.rows.length > 0) {
+          const row = existing.rows[0];
+          const newCount = row.repetition_count + 1;
+          const newScore = calculateScore(
+            newCount,
+            row.category,
+            row.createdat
+          );
+
+          await pool.query(
+            "UPDATE news SET repetition_count=$1, score=$2 WHERE topic_hash=$3",
+            [newCount, newScore, topicHash]
+          );
+
+          return res.json({ updated: true });
+        }
+
+        const createdAt = Date.now();
+        const initialScore = calculateScore(1, category, createdAt);
 
         await pool.query(
-          "UPDATE news SET repetition_count=$1, score=$2 WHERE topic_hash=$3",
-          [newCount, newScore, topicHash]
+          `INSERT INTO news
+           (title, summary, category, topic_hash, repetition_count, score, createdAt)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            title,
+            summary,
+            category || "State",
+            topicHash,
+            1,
+            initialScore,
+            createdAt
+          ]
         );
 
-        return res.json({ updated: true });
+        res.json({ saved: true });
+
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Server error" });
       }
-
-      const createdAt = Date.now();
-      const initialScore = calculateScore(1, category, createdAt);
-
-      await pool.query(
-        `INSERT INTO news
-         (title, summary, category, topic_hash, repetition_count, score, createdAt)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          title,
-          summary,
-          category || "State",
-          topicHash,
-          1,
-          initialScore,
-          createdAt
-        ]
-      );
-
-      res.json({ saved: true });
     });
 
     app.get("/api/trending", async (req, res) => {
-      const result = await pool.query(
-        "SELECT * FROM news ORDER BY score DESC LIMIT 20"
-      );
-      res.json(result.rows);
+      try {
+        const result = await pool.query(
+          "SELECT * FROM news ORDER BY score DESC LIMIT 20"
+        );
+        res.json(result.rows);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Server error" });
+      }
     });
 
+    /* ================= START LISTEN ================= */
+
+    const PORT = process.env.PORT || 8080;
+
     app.listen(PORT, "0.0.0.0", () => {
-      console.log("✅ Server running on", PORT);
+      console.log("🚀 Server running on", PORT);
     });
 
   } catch (err) {
