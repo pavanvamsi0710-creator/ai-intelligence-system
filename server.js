@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import Parser from "rss-parser";
-import cheerio from "cheerio";
+import * as cheerio from "cheerio";
 import cron from "node-cron";
 import { v4 as uuidv4 } from "uuid";
 
