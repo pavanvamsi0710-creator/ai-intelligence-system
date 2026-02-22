@@ -25,26 +25,31 @@ async function startServer() {
 
     await pool.query("SELECT 1");
 
-    /* ================= CREATE TABLE ================= */
+    /* ================= RESET & CREATE TABLE ================= */
 
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS news (
-        id SERIAL PRIMARY KEY,
-        title TEXT,
-        source_link TEXT,
-        source TEXT,
-        photo TEXT,
-        video_link TEXT,
-        summary TEXT,
-        category TEXT,
-        topic_hash TEXT UNIQUE,
-        repetition_count INT DEFAULT 1,
-        score INT DEFAULT 0,
-        createdat BIGINT
-      )
-    `);
+// TEMP FIX – delete old broken table
+await pool.query(`
+  DROP TABLE IF EXISTS news;
+`);
 
-    console.log("✅ Database Connected");
+await pool.query(`
+  CREATE TABLE news (
+    id SERIAL PRIMARY KEY,
+    title TEXT,
+    source_link TEXT,
+    source TEXT,
+    photo TEXT,
+    video_link TEXT,
+    summary TEXT,
+    category TEXT,
+    topic_hash TEXT UNIQUE,
+    repetition_count INT DEFAULT 1,
+    score INT DEFAULT 0,
+    createdat BIGINT
+  )
+`);
+
+console.log("✅ Database Reset & Connected");
 
     /* ================= HELPERS ================= */
 
