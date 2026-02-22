@@ -16,7 +16,9 @@ let newsDB = [];
 let deletedNews = [];
 
 const PORT = 5000;
-
+app.get("/", (req, res) => {
+  res.send("Backend Working");
+});
 /* -----------------------------------------
    NEWS SOURCES (Sports example)
 ------------------------------------------ */
