@@ -1,253 +1,163 @@
-import express from "express";
-import crypto from "crypto";
-import cors from "cors";
-import pkg from "pg";
-
-const { Pool } = pkg;
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
+const Parser = require("rss-parser");
+const cheerio = require("cheerio");
+const cron = require("node-cron");
+const { v4: uuidv4 } = require("uuid");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ================= START SERVER ================= */
+const parser = new Parser();
 
-async function startServer() {
-  try {
+let newsDB = [];
+let deletedNews = [];
 
-    if (!process.env.DATABASE_URL) {
-      throw new Error("DATABASE_URL is missing");
-    }
+const PORT = 5000;
 
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
-    });
+/* -----------------------------------------
+   NEWS SOURCES (Sports example)
+------------------------------------------ */
 
-    await pool.query("SELECT 1");
+const sources = {
+  cricket: [
+    "https://news.google.com/rss/search?q=cricket&hl=en-IN&gl=IN&ceid=IN:en"
+  ],
+  football: [
+    "https://news.google.com/rss/search?q=football&hl=en-IN&gl=IN&ceid=IN:en"
+  ],
+  india: [
+    "https://news.google.com/rss/search?q=india+news&hl=en-IN&gl=IN&ceid=IN:en"
+  ]
+};
 
-    /* ================= RESET & CREATE TABLE ================= */
+/* -----------------------------------------
+   CLEAN HTML FUNCTION
+------------------------------------------ */
 
-// TEMP FIX – delete old broken table
-await pool.query(`
-  DROP TABLE IF EXISTS news;
-`);
-
-await pool.query(`
-  CREATE TABLE news (
-    id SERIAL PRIMARY KEY,
-    title TEXT,
-    source_link TEXT,
-    source TEXT,
-    photo TEXT,
-    video_link TEXT,
-    summary TEXT,
-    category TEXT,
-    topic_hash TEXT UNIQUE,
-    repetition_count INT DEFAULT 1,
-    score INT DEFAULT 0,
-    createdat BIGINT
-  )
-`);
-
-console.log("✅ Database Reset & Connected");
-
-    /* ================= HELPERS ================= */
-
-    function cleanText(t = "") {
-      return t
-        .replace(/<[^>]+>/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function makeTopicHash(title) {
-      return crypto.createHash("sha1").update(title).digest("hex");
-    }
-
-    function calculateScore(count, createdat) {
-      let score = count * 5;
-
-      const hoursOld = (Date.now() - createdat) / (1000 * 60 * 60);
-
-      if (hoursOld < 1) score += 15;
-      else if (hoursOld < 3) score += 8;
-      else if (hoursOld < 6) score += 4;
-
-      return score;
-    }
-
-    /* ================= SAVE RAW NEWS ================= */
-
-    app.post("/api/news/raw", async (req, res) => {
-      try {
-
-        const {
-          title,
-          source_link,
-          source,
-          photo,
-          video_link,
-          summary,
-          category
-        } = req.body;
-
-        if (!title || !source_link || !source) {
-          return res.json({ skipped: true });
-        }
-
-        const cleanTitle = cleanText(title);
-        const topicHash = makeTopicHash(cleanTitle);
-
-        const existing = await pool.query(
-          "SELECT * FROM news WHERE topic_hash=$1",
-          [topicHash]
-        );
-
-        if (existing.rows.length > 0) {
-
-          const row = existing.rows[0];
-          const newCount = row.repetition_count + 1;
-          const newScore = calculateScore(newCount, row.createdat);
-
-          await pool.query(
-            "UPDATE news SET repetition_count=$1, score=$2 WHERE topic_hash=$3",
-            [newCount, newScore, topicHash]
-          );
-
-          return res.json({ updated: true });
-        }
-
-        const createdat = Date.now();
-        const initialScore = calculateScore(1, createdat);
-
-        await pool.query(
-          `INSERT INTO news
-          (title, source_link, source, photo, video_link, summary, category,
-           topic_hash, repetition_count, score, createdat)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-          [
-            cleanTitle,
-            source_link,
-            cleanText(source),
-            photo || null,
-            video_link || null,
-            cleanText(summary),
-            category || "General",
-            topicHash,
-            1,
-            initialScore,
-            createdat
-          ]
-        );
-
-        res.json({ saved: true });
-
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Server error" });
-      }
-    });
-
-    /* ================= CATEGORY ROUTE ================= */
-
-    app.get("/api/news/category/:cat", async (req, res) => {
-      try {
-
-        const cat = req.params.cat;
-
-        const result = await pool.query(`
-          SELECT
-            title,
-            source_link,
-            source,
-            photo,
-            video_link,
-            summary,
-            createdat
-          FROM news
-          WHERE category=$1
-          ORDER BY createdat DESC
-          LIMIT 30
-        `, [cat]);
-
-        res.json(result.rows);
-
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Server error" });
-      }
-    });
-
-    /* ================= TRENDING (BALANCED) ================= */
-
-    app.get("/api/trending", async (req, res) => {
-      try {
-
-        const result = await pool.query(`
-          SELECT
-            title,
-            source_link,
-            source,
-            photo,
-            video_link,
-            summary,
-            category,
-            score,
-            createdat
-          FROM news
-          WHERE createdat > $1
-          ORDER BY score DESC
-          LIMIT 30
-        `, [Date.now() - 24 * 60 * 60 * 1000]);
-
-        res.json(result.rows);
-
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Server error" });
-      }
-    });
-
-    /* ================= REFRESH ROUTE ================= */
-
-    app.get("/api/latest", async (req, res) => {
-      try {
-
-        const result = await pool.query(`
-          SELECT
-            title,
-            source_link,
-            source,
-            photo,
-            video_link,
-            summary,
-            category,
-            createdat
-          FROM news
-          ORDER BY createdat DESC
-          LIMIT 30
-        `);
-
-        res.json(result.rows);
-
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Server error" });
-      }
-    });
-
-    /* ================= START SERVER ================= */
-
-    const PORT = process.env.PORT || 8080;
-
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log("🚀 Server running on", PORT);
-    });
-
-  } catch (err) {
-    console.error("❌ Startup Error:", err);
-    process.exit(1);
-  }
+function cleanHTML(html) {
+  const $ = cheerio.load(html || "");
+  return $.text().replace(/\s+/g, " ").trim();
 }
 
-startServer();
+/* -----------------------------------------
+   FETCH NEWS
+------------------------------------------ */
+
+async function fetchNews() {
+  for (let category in sources) {
+    for (let url of sources[category]) {
+      const feed = await parser.parseURL(url);
+
+      feed.items.forEach(item => {
+        const cleanedSummary = cleanHTML(item.contentSnippet);
+
+        const newsItem = {
+          id: uuidv4(),
+          title: item.title,
+          source_link: item.link,
+          source: item.creator || feed.title || "Unknown",
+          photo: null,
+          video_link: null,
+          summary: cleanedSummary,
+          category,
+          published_at: item.pubDate,
+          incident_date: item.pubDate,
+          created_at: new Date(),
+          deleted: false
+        };
+
+        // avoid duplicates
+        if (!newsDB.some(n => n.title === newsItem.title)) {
+          newsDB.push(newsItem);
+        }
+      });
+    }
+  }
+
+  console.log("News updated:", new Date());
+}
+
+/* -----------------------------------------
+   AUTO FETCH EVERY 2 MINUTES
+------------------------------------------ */
+
+cron.schedule("*/2 * * * *", () => {
+  fetchNews();
+});
+
+/* -----------------------------------------
+   AUTO DELETE AFTER 38 HOURS
+------------------------------------------ */
+
+cron.schedule("0 * * * *", () => {
+  const now = new Date();
+
+  newsDB.forEach(news => {
+    const hours = (now - new Date(news.created_at)) / (1000 * 60 * 60);
+
+    if (hours >= 38 && !news.deleted) {
+      news.deleted = true;
+      deletedNews.push(news);
+    }
+  });
+
+  newsDB = newsDB.filter(news => !news.deleted);
+
+  console.log("Auto deletion checked");
+});
+
+/* -----------------------------------------
+   GET NEWS BY CATEGORY
+------------------------------------------ */
+
+app.get("/news/:category", (req, res) => {
+  const category = req.params.category;
+  const data = newsDB
+    .filter(n => n.category === category)
+    .sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+
+  res.json(data);
+});
+
+/* -----------------------------------------
+   REFRESH ROUTE
+------------------------------------------ */
+
+app.get("/refresh", async (req, res) => {
+  await fetchNews();
+  res.json({ message: "News refreshed successfully" });
+});
+
+/* -----------------------------------------
+   ADMIN ROUTES
+------------------------------------------ */
+
+app.get("/admin/active", (req, res) => {
+  res.json(newsDB);
+});
+
+app.get("/admin/deleted", (req, res) => {
+  res.json(deletedNews);
+});
+
+app.post("/admin/restore/:id", (req, res) => {
+  const id = req.params.id;
+  const news = deletedNews.find(n => n.id === id);
+
+  if (news) {
+    news.deleted = false;
+    newsDB.push(news);
+    deletedNews = deletedNews.filter(n => n.id !== id);
+    res.json({ message: "Restored successfully" });
+  } else {
+    res.json({ message: "Not found" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  fetchNews();
+});
