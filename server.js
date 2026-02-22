@@ -1,10 +1,10 @@
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
-const Parser = require("rss-parser");
-const cheerio = require("cheerio");
-const cron = require("node-cron");
-const { v4: uuidv4 } = require("uuid");
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import Parser from "rss-parser";
+import cheerio from "cheerio";
+import cron from "node-cron";
+import { v4 as uuidv4 } from "uuid";
 
 const app = express();
 app.use(cors());
